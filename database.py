@@ -151,3 +151,10 @@ def set_limit_notification_flag(user_id: int, level: str, month_str: str):
                 ON CONFLICT(user_id) DO UPDATE SET {column} = excluded.{column}""",
             (user_id, month_str),
         )
+        def get_total_users_count():
+    conn = sqlite3.connect("finance.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM transactions")
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
