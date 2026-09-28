@@ -45,3 +45,12 @@ async def cancel_action(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Bekor qilindi.", reply_markup=MAIN_MENU)
     from database import get_total_users_count
+ADMIN_ID = 7034531695
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    total_users = get_total_users_count()
+    await message.answer(f"📊 **Bot statistikasi:**\n\nJami foydalanuvchilar: {total_users}")
