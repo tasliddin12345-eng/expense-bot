@@ -44,7 +44,7 @@ async def cmd_help(message: Message):
 async def cancel_action(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Bekor qilindi.", reply_markup=MAIN_MENU)
-    from database import get_total_users_count
+from database import get_total_users_count
 ADMIN_ID = 7034531695
 
 @router.message(Command("stats"))
