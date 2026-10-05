@@ -1,9 +1,10 @@
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from collections import defaultdict
 
 from aiogram import Router, F
-from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.filters import Command, CommandObject
+from aiogram.types import (CallbackQuery, InlineKeyboardButton,
+                           InlineKeyboardMarkup, Message)
 
 import database as db
 from keyboards import MAIN_MENU
@@ -41,18 +42,38 @@ def build_today_report(user_id: int) -> str:
     return "\n".join(lines)
 
 
-def build_month_report(user_id: int) -> str:
-    rows = db.get_month_transactions(user_id)
-    now = datetime.now()
-    month_label = format_date_uz(now).split(" ", 1)[1]  # "Sentabr 2026"
+# ---------- oylik hisobot: tanlangan sanadan keyingi oyning shu sanasigacha ----------
+def add_months(d: date, n: int) -> date:
+    y, m = divmod(d.year * 12 + d.month - 1 + n, 12)
+    return date(y, m + 1, d.day)  # kun 1..28 bo'lgani uchun xavfsiz
+
+
+def get_period(day: int, offset: int = 0):
+    """offset=0 joriy davr, -1 o'tgan davr, -2 undan oldingi ...
+    Qaytaradi: (boshlanish, tugash). Tugash sanasi kirmaydi."""
+    today = date.today()
+    start = date(today.year, today.month, day)
+    if today.day < day:
+        start = add_months(start, -1)
+    start = add_months(start, offset)
+    return start, add_months(start, 1)
+
+
+def build_month_report(user_id: int, offset: int = 0) -> str:
+    day = db.get_period_day(user_id)
+    start, end = get_period(day, offset)
+    last_day = end - timedelta(days=1)
+    label = f"{start:%d.%m.%Y} - {last_day:%d.%m.%Y}"
+    footer = "\n\nℹ️ Hisobot boshlanish sanasini o'zgartirish: <code>/kun 10</code>"
+
+    rows = db.get_transactions_between(user_id, start, end)
 
     if not rows:
-        return f"📅 <b>Oylik hisobot ({month_label})</b>\n\nBu oyda hali yozuv kiritilmagan."
+        return f"📅 <b>Oylik hisobot ({label})</b>\n\nBu davrda yozuv kiritilmagan." + footer
 
     income_total = 0
     expense_total = 0
     expense_by_category = defaultdict(float)
-    days_with_expense = set()
 
     for row in rows:
         if row["type"] == "income":
@@ -60,9 +81,8 @@ def build_month_report(user_id: int) -> str:
         else:
             expense_total += row["amount"]
             expense_by_category[row["category"]] += row["amount"]
-            days_with_expense.add(row["created_at"][:10])
 
-    lines = [f"📅 <b>Oylik hisobot ({month_label})</b>\n"]
+    lines = [f"📅 <b>Oylik hisobot ({label})</b>\n"]
     lines.append(f"💰 Jami daromad: {format_amount(income_total)}")
     lines.append(f"💸 Jami xarajat: {format_amount(expense_total)}")
     lines.append(f"📈 Sof qoldiq: {format_amount(income_total - expense_total)}")
@@ -74,8 +94,9 @@ def build_month_report(user_id: int) -> str:
             percent = (amount / expense_total) * 100
             lines.append(f"{category}: {format_amount(amount)} ({percent:.1f}%)")
 
-    day_count = now.day
-    avg_daily = expense_total / day_count if day_count else 0
+    # Kunlik o'rtacha: joriy davrda bugungi kungacha, o'tgan davrda to'liq davr bo'yicha
+    days_passed = (min(date.today(), last_day) - start).days + 1
+    avg_daily = expense_total / days_passed if days_passed > 0 else 0
     lines.append(f"\n📆 Kunlik o'rtacha xarajat: {format_amount(avg_daily)}")
 
     limit = db.get_monthly_limit(user_id)
@@ -87,7 +108,14 @@ def build_month_report(user_id: int) -> str:
         else:
             lines.append(f"🚨 Limitdan {format_amount(abs(remaining))} ga oshib ketdingiz!")
 
-    return "\n".join(lines)
+    return "\n".join(lines) + footer
+
+
+def month_keyboard(offset: int) -> InlineKeyboardMarkup:
+    row = [InlineKeyboardButton(text="◀ Oldingi oy", callback_data=f"mrep:{offset - 1}")]
+    if offset < 0:
+        row.append(InlineKeyboardButton(text="Keyingi oy ▶", callback_data=f"mrep:{offset + 1}"))
+    return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
 @router.message(Command("today"))
@@ -100,5 +128,38 @@ async def today_report(message: Message):
 @router.message(Command("month"))
 @router.message(F.text == "📅 Oylik hisobot")
 async def month_report(message: Message):
-    text = build_month_report(message.from_user.id)
-    await message.answer(text, reply_markup=MAIN_MENU)
+    text = build_month_report(message.from_user.id, 0)
+    await message.answer(text, reply_markup=month_keyboard(0))
+
+
+@router.callback_query(F.data.startswith("mrep:"))
+async def month_report_nav(call: CallbackQuery):
+    offset = min(int(call.data.split(":")[1]), 0)
+    text = build_month_report(call.from_user.id, offset)
+    await call.message.edit_text(text, reply_markup=month_keyboard(offset))
+    await call.answer()
+
+
+@router.message(Command("kun"))
+async def set_period_day(message: Message, command: CommandObject):
+    user_id = message.from_user.id
+    current = db.get_period_day(user_id)
+    try:
+        day = int((command.args or "").strip())
+        if not 1 <= day <= 28:
+            raise ValueError
+    except ValueError:
+        await message.answer(
+            f"Hisobot hozir har oyning <b>{current}</b>-sanasidan boshlanadi.\n\n"
+            "O'zgartirish uchun 1 dan 28 gacha son yozing.\n"
+            "Masalan: <code>/kun 10</code>",
+            reply_markup=MAIN_MENU,
+        )
+        return
+
+    db.set_period_day(user_id, day)
+    await message.answer(
+        f"✅ Endi oylik hisobot har oyning <b>{day}</b>-sanasidan keyingi oyning "
+        f"{day}-sanasigacha hisoblanadi.\n\n📅 Oylik hisobot tugmasini bosib ko'ring.",
+        reply_markup=MAIN_MENU,
+    )
