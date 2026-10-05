@@ -1,8 +1,24 @@
+import os
+import shutil
 import sqlite3
 from datetime import datetime, date
 from contextlib import contextmanager
 
-DB_NAME = "finance.db"
+# Railway'da DB_PATH=/data/hisob.db (Volume) bo'lsa, ma'lumotlar yangilanishda o'chmaydi.
+DB_NAME = os.getenv("DB_PATH", "finance.db")
+_SEED_DB = "finance.db"
+
+
+def _prepare_db_file():
+    folder = os.path.dirname(DB_NAME)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    # Volume'dagi baza hali yo'q bo'lsa, repozitoriyadagi eski finance.db ni nusxalaymiz
+    if DB_NAME != _SEED_DB and not os.path.exists(DB_NAME) and os.path.exists(_SEED_DB):
+        shutil.copy(_SEED_DB, DB_NAME)
+
+
+_prepare_db_file()
 
 
 @contextmanager
@@ -40,6 +56,11 @@ def init_db():
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_user_date ON transactions(user_id, created_at)")
 
+        # Yangi ustun: hisobot boshlanish sanasi (eski bazaga ham xavfsiz qo'shiladi)
+        cols = [r["name"] for r in cur.execute("PRAGMA table_info(user_settings)").fetchall()]
+        if "period_day" not in cols:
+            cur.execute("ALTER TABLE user_settings ADD COLUMN period_day INTEGER DEFAULT 1")
+
 
 def add_transaction(user_id: int, type_: str, category: str, amount: float, note: str = ""):
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -73,6 +94,18 @@ def get_month_transactions(user_id: int, year: int = None, month: int = None):
         cur.execute(
             "SELECT * FROM transactions WHERE user_id = ? AND created_at LIKE ? ORDER BY created_at ASC",
             (user_id, f"{month_str}%"),
+        )
+        return cur.fetchall()
+
+
+def get_transactions_between(user_id: int, start: date, end: date):
+    """start dan end gacha (end kirmaydi) bo'lgan yozuvlar."""
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM transactions WHERE user_id = ? AND created_at >= ? AND created_at < ? "
+            "ORDER BY created_at ASC",
+            (user_id, start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")),
         )
         return cur.fetchall()
 
@@ -129,6 +162,26 @@ def get_monthly_limit(user_id: int):
         return row["monthly_limit"] if row else 0
 
 
+def get_period_day(user_id: int) -> int:
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT period_day FROM user_settings WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        if row and row["period_day"]:
+            return int(row["period_day"])
+        return 1
+
+
+def set_period_day(user_id: int, day: int):
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO user_settings (user_id, period_day) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET period_day = excluded.period_day""",
+            (user_id, day),
+        )
+
+
 def get_limit_notification_flags(user_id: int):
     with get_connection() as conn:
         cur = conn.cursor()
@@ -151,10 +204,10 @@ def set_limit_notification_flag(user_id: int, level: str, month_str: str):
                 ON CONFLICT(user_id) DO UPDATE SET {column} = excluded.{column}""",
             (user_id, month_str),
         )
+
+
 def get_total_users_count():
-    conn = sqlite3.connect("finance.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(DISTINCT user_id) FROM transactions")
-    count = cursor.fetchone()[0]
-    conn.close()
-    return count
+    with get_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM transactions")
+        return cur.fetchone()[0]
