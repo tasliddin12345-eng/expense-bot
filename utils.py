@@ -50,6 +50,8 @@ def parse_amount(text: str):
     match = re.match(r"^(\d+(?:\.\d+)?)$", text)
     if match:
         value = float(match.group(1))
+         if value < 1000:
+            value *= 1000
         return value if value > 0 else None
 
     return None
